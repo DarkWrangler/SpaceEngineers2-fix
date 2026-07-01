@@ -1,51 +1,105 @@
 #!/bin/bash
 
 # ==============================================================================
-# USER & HOME DIRECTORY
+# USER & HOME DIRECTORY | APP ID
+# Configure at your own risk
 # ==============================================================================
 REAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
+# Global configuration flag for GUI fallback status
+USE_GUI=true
+DOWNLOAD_METHOD="curl" # Tracks fallback status: "curl", "git", or "none"
+GIT_URL="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
+TARGET_APP_ID="1133870"
+
 # ==============================================================================
-# DEPENDENCY CHECK ()DISTRO AGNOSTIC)
+# DEPENDENCY CHECK & GUI FALLBACK REGULATION
 # ==============================================================================
 ensure_dependencies() {
-    # We need curl for the GitHub API and Zenity for GUI dialogues
-    DEPS=("zenity" "curl")
-    MISSING_DEPS=()
-
-    for dep in "${DEPS[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            MISSING_DEPS+=("$dep")
+    # Check for Zenity, attempt install if missing
+    if ! command -v zenity &> /dev/null; then
+        echo "Zenity not found. Attempting to install..."
+        if command -v dnf &> /dev/null; then sudo dnf install zenity -y &> /dev/null
+        elif command -v apt-get &> /dev/null; then sudo apt-get update &> /dev/null && sudo apt-get install zenity -y &> /dev/null
+        elif command -v pacman &> /dev/null; then sudo pacman -S --noconfirm zenity &> /dev/null
+        elif command -v zypper &> /dev/null; then sudo zypper install -y zenity &> /dev/null
         fi
-    done
+    fi
 
-    if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-        echo "Missing tools: ${MISSING_DEPS[*]}. Installing..."
-        if command -v dnf &> /dev/null; then
-            sudo dnf install "${MISSING_DEPS[@]}" -y
-        elif command -v apt-get &> /dev/null; then
-            sudo apt-get update && sudo apt-get install "${MISSING_DEPS[@]}" -y
-        elif command -v pacman &> /dev/null; then
-            sudo pacman -S --noconfirm "${MISSING_DEPS[@]}"
-        elif command -v zypper &> /dev/null; then
-            sudo zypper install -y "${MISSING_DEPS[@]}"
-        else
-            echo "CRITICAL: Package manager not recognized. Manually install: ${MISSING_DEPS[*]}" >&2
-            exit 1
+    if ! command -v zenity &> /dev/null; then
+        echo "WARNING: Zenity package not found. Using terminal mode."
+        USE_GUI=false
+    fi
+
+    # Core Downloader check (curl first)
+    if ! command -v curl &> /dev/null; then
+        echo "curl not found. Attempting to install..."
+        if command -v dnf &> /dev/null; then sudo dnf install curl -y &> /dev/null
+        elif command -v apt-get &> /dev/null; then sudo apt-get update &> /dev/null && sudo apt-get install curl -y &> /dev/null
+        elif command -v pacman &> /dev/null; then sudo pacman -S --noconfirm curl &> /dev/null
+        elif command -v zypper &> /dev/null; then sudo zypper install -y curl &> /dev/null
+        fi
+    fi
+
+    # HAIL MARY: If curl is totally missing, install and fall back to git
+    if ! command -v curl &> /dev/null; then
+        echo "WARNING: curl is unavailable. Attempting to acquire git as a Hail Mary fallback..."
+        DOWNLOAD_METHOD="git"
+
+        if ! command -v git &> /dev/null; then
+            if command -v dnf &> /dev/null; then sudo dnf install git -y &> /dev/null
+            elif command -v apt-get &> /dev/null; then sudo apt-get update &> /dev/null && sudo apt-get install git -y &> /dev/null
+            elif command -v pacman &> /dev/null; then sudo pacman -S --noconfirm git &> /dev/null
+            elif command -v zypper &> /dev/null; then sudo zypper install -y git &> /dev/null
+            fi
+        fi
+
+        if ! command -v git &> /dev/null; then
+            DOWNLOAD_METHOD="none"
+            show_message "error" "Critical Error" "Both curl and git are missing. Downloader feature disabled."
         fi
     fi
 }
 
-# Run dependency check first
 ensure_dependencies
+
+# ==============================================================================
+# INTERACTIVE HELPER FUNCTIONS (GUI / TERMINAL DUAL ENGINE)
+# ==============================================================================
+
+show_message() {
+    local type="$1"
+    local title="$2"
+    local text="$3"
+    
+    if [ "$USE_GUI" = true ]; then
+        zenity --"$type" --title="$title" --text="$text" --width=450
+    else
+        echo -e "\n=== [$title] ===\n$text\n================\n"
+    fi
+}
+
+show_confirmation() {
+    local title="$1"
+    local text="$2"
+    
+    if [ "$USE_GUI" = true ]; then
+        zenity --question --title="$title" --text="$text" --width=450
+        return $?
+    else
+        echo -e "\n=== [$title] ===\n$text\n================"
+        read -p "Do you want to continue? (y/N): " response
+        [[ "$response" =~ ^[Yy]$ ]]
+    fi
+}
 
 # ==============================================================================
 # CORE FUNCTIONS
 # ==============================================================================
 
 # FUNCTION: Show Usage Help Text
-show_help_text() {
+show_help() {
     echo "================================================================="
     echo " Space Engineers 2 Linux Suite Multitool "
     echo "================================================================="
@@ -60,12 +114,12 @@ show_help_text() {
     echo "  -h, --help     Display this help documentation."
     echo ""
     echo "Prerequisites:"
-    echo "  Ensure Space Engineers 2 is fully installed via Steam before"
+    echo "  Ensure Space Engineers 2 (APP ID: $TARGET_APP_ID) is fully installed via Steam before"
     echo "  running the fix command."
     echo "================================================================="
 }
 
-# FUNCTION: Fix Space Engineers 2 Environment
+# FUNCTION: Fix Space Engineers 2 Environment (Shrunk & Mount-Verified)
 fix_space_engineers() {
     STEAM_ROOTS=(
         "$USER_HOME/.local/share/Steam"
@@ -74,55 +128,56 @@ fix_space_engineers() {
         "$USER_HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
     )
 
-    # Discover the path to the Library Folders VDF
     VDF_PATH=""
     for root in "${STEAM_ROOTS[@]}"; do
         if [[ -f "$root/steamapps/libraryfolders.vdf" ]]; then
             VDF_PATH="$root/steamapps/libraryfolders.vdf"
-            STEAM_ROOT_DIR="$root"
             break
         fi
     done
 
     if [[ -z "$VDF_PATH" ]]; then
-        zenity --error --title="Error" --text="Could not find your base Steam installation directory or libraryfolders.vdf."
+        show_message "error" "Error" "Could not find your base Steam installation directory or libraryfolders.vdf."
         return 1
     fi
 
-    # Target Space Engineers 2 APP_ID
-    TARGET_APP_ID="1133870"
     GAME_LIBRARY_PATH=""
+    PATH_REGEX='^"path"[[:space:]]+"(.*)"'
+    APP_REGEX='^\"$TARGET_APP_ID\"[[:space:]]+'
 
-    # Parse the VDF for the path
+    # Single-pass loop reads the VDF file directly
     while IFS= read -r line; do
         line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-        if [[ "$line" =~ ^\"path\"[[:space:]]+\"(.*)\" ]]; then
+        
+        if [[ "$line" =~ $PATH_REGEX ]]; then
             current_path="${BASH_REMATCH[1]}"
             current_path="${current_path//\\\\//}"
         fi
-        # Check the file for the APP_ID to ensure the install location
-        if [[ "$line" =~ ^\"$TARGET_APP_ID\"[[:space:]]+ ]]; then
-            if [[ -d "$current_path/steamapps" ]]; then
-                GAME_LIBRARY_PATH="$current_path"
-                break
+        
+        if [[ "$line" =~ $APP_REGEX ]]; then
+            # Optimization: If the path is /home/ (root drive) it's always mounted.
+            # If it is an external path (like /media/ or /run/media/), verify it is currently mounted.
+            if [[ "$current_path" =~ ^/home/ ]] || findmnt -M "$current_path" &> /dev/null || mountpoint -q "$current_path"; then
+                if [[ -d "$current_path/steamapps" ]]; then
+                    GAME_LIBRARY_PATH="$current_path"
+                    break
+                fi
+            else
+                show_message "error" "Mount Warning" "Found Space Engineers 2 entry pointing to:\n$current_path\n\nHowever, this storage drive is currently unmounted or sleeping. Please mount the disk and try again."
+                return 1
             fi
         fi
     done < "$VDF_PATH"
 
-    if [[ -z "$GAME_LIBRARY_PATH" && -d "$STEAM_ROOT_DIR/steamapps/common/SpaceEngineers2" ]]; then
-        GAME_LIBRARY_PATH="$STEAM_ROOT_DIR"
-    fi
-
     if [[ -z "$GAME_LIBRARY_PATH" ]]; then
-        zenity --error --title="Error" --text="Space Engineers 2 (AppID: $TARGET_APP_ID) was not found in any registered Steam Library."
+        show_message "error" "Error" "Space Engineers 2 (AppID: $TARGET_APP) was not found in any active or mounted Steam Library."
         return 1
     fi
-    
-    # Set the game and compatdata directories.
+
     GAME_DIR="$GAME_LIBRARY_PATH/steamapps/common/SpaceEngineers2"
     COMPAT_DATA="$GAME_LIBRARY_PATH/steamapps/compatdata/$TARGET_APP_ID"
 
-    zenity --question --title="SE2 Environment Fixer" --text="Target User: $REAL_USER\nGame Found: $GAME_DIR\nCompat Data: $COMPAT_DATA\n\nThis will reset the hardware cache and repair the .NET 9 environment. Continue?" || return 1
+    show_confirmation "SE2 Environment Fixer" "Target User: $REAL_USER\nGame Found: $GAME_DIR\nCompat Data: $COMPAT_DATA\n\nThis will reset the hardware cache and repair the .NET 9 environment." || return 1
 
     if [ -d "$COMPAT_DATA" ]; then
         echo "Clearing hardware cache..."
@@ -130,96 +185,168 @@ fix_space_engineers() {
     fi
 
     echo "Forcing Windows 10 Registry..."
-    protontricks 1133870 win10
+    protontricks $TARGET_APP_ID win10
 
     echo "Repairing .NET 9 Desktop Runtime..."
     if [ -f "$GAME_DIR/redist/dotnet-runtime-9.0-latest.exe" ]; then
         if [ -n "$SUDO_USER" ]; then
-            sudo -u "$REAL_USER" protontricks -c "wine $GAME_DIR/redist/dotnet-runtime-9.0-latest.exe" 1133870
+            sudo -u "$REAL_USER" protontricks -c "wine $GAME_DIR/redist/dotnet-runtime-9.0-latest.exe" $TARGET_APP_ID
         else
-            protontricks -c "wine $GAME_DIR/redist/dotnet-runtime-9.0-latest.exe" 1133870
+            protontricks -c "wine $GAME_DIR/redist/dotnet-runtime-9.0-latest.exe" $TARGET_APP_ID
         fi
     else
-        zenity --error --text="Could not find .NET 9 installer at:\n$GAME_DIR/redist/dotnet-runtime-9.0-latest.exe\n\nPlease verify game files in Steam."
+        show_message "error" "Error" "Could not find .NET 9 installer at:\n$GAME_DIR/redist/dotnet-runtime-9.0-latest.exe\n\nPlease verify game files in Steam."
         return 1
     fi
 
     show_final_instructions
 }
 
+
 # FUNCTION: Download and Install Latest GE Proton Build
 install_latest_eggroll() {
-    # Resolve the standard native compatibility tools destination path
+    if [ "$DOWNLOAD_METHOD" = "none" ]; then
+        show_message "error" "Feature Disabled" "Cannot proceed. Network tools (curl/git) are missing."
+        return 1
+    fi
+
     COMPAT_DIR="$USER_HOME/.steam/steam/compatibilitytools.d"
     
     echo "Ensuring directory exists: $COMPAT_DIR"
-    # Ensure creation runs under the real user's scope if running via sudo
     if [ -n "$SUDO_USER" ]; then
         sudo -u "$REAL_USER" mkdir -p "$COMPAT_DIR"
     else
         mkdir -p "$COMPAT_DIR"
     fi
 
-    echo "Fetching latest GE Proton asset info from GitHub API..."
-    API_URL="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
-    # Use curl to pluck out the proper full browser download url for the .tar.gz package
-    TARBALL_URL=$(curl -s "$API_URL" | grep "browser_download_url" | cut -d '"' -f 4 | grep ".tar.gz" | grep -v "aarch64" | head -n 1)
+    # --------------------------------------------------------------------------
+    # PIPELINE A: STANDARD CURL BINARY DOWNLOAD
+    # --------------------------------------------------------------------------
+    if [ "$DOWNLOAD_METHOD" = "curl" ]; then
+        echo "Using curl pipeline..."
+        TARBALL_URL=$(curl -s "$GIT_URL" | grep "browser_download_url" | cut -d '"' -f 4 | grep ".tar.gz" | grep -v "aarch64" | head -n 1)
 
-    if [[ -z "$TARBALL_URL" ]]; then
-        zenity --error --title="Error" --text="Failed to fetch the latest download link from GloriousEggroll's repository."
-        return 1
+        if [[ -z "$TARBALL_URL" ]]; then
+            show_message "error" "Error" "Failed to parse download link via curl."
+            return 1
+        fi
+
+        FILENAME=$(basename "$TARBALL_URL")
+        TMP_FILE="/tmp/$FILENAME"
+
+        echo "Downloading $FILENAME via curl..."
+        if [ -n "$SUDO_USER" ]; then
+            sudo -u "$REAL_USER" curl -L "$TARBALL_URL" -o "$TMP_FILE"
+            sudo -u "$REAL_USER" tar -xf "$TMP_FILE" -C "$COMPAT_DIR/"
+            rm -f "$TMP_FILE"
+        else
+            curl -L "$TARBALL_URL" -o "$TMP_FILE"
+            tar -xf "$TMP_FILE" -C "$COMPAT_DIR/"
+            rm -f "$TMP_FILE"
+        fi
+        
+        show_message "info" "Proton-GE Installed" "Successfully downloaded and extracted the binary package!\n\nPlease restart Steam completely to apply changes."
+
+    # --------------------------------------------------------------------------
+    # PIPELINE B: HAIL MARY GIT REPO CLONE & INTERACTIVE AUTOMATED BUILD
+    # --------------------------------------------------------------------------
+    elif [ "$DOWNLOAD_METHOD" = "git" ]; then
+        echo "curl failed. Initializing Git Clone pipeline..."
+        TARGET_CLONE_DIR="$COMPAT_DIR/proton-ge-custom-source"
+
+        if [ -d "$TARGET_CLONE_DIR" ]; then
+            rm -rf "$TARGET_CLONE_DIR"
+        fi
+
+        echo "Cloning repository structure..."
+        if [ -n "$SUDO_USER" ]; then
+            sudo -u "$REAL_USER" git clone --depth 1 "$GIT_URL" "$TARGET_CLONE_DIR"
+        else
+            git clone --depth 1 "$GIT_URL" "$TARGET_CLONE_DIR"
+        fi
+
+        # Interactively ask the user if they want us to build it
+        if show_confirmation "Source Tree Acquired via Git" "Notice: curl was unavailable. The script successfully executed a git clone of the Proton-GE source structure into:\n$TARGET_CLONE_DIR\n\nCRITICAL: Git pulls raw source files, not a pre-compiled binary.\n\nWould you like the script to attempt to automatically compile and build Proton-GE for you right now?"; then
+            
+            echo "Checking for essential compilation tools..."
+            BUILD_DEPS=("make" "gcc" "g++")
+            MISSING_BUILD_DEPS=()
+
+            for bdep in "${BUILD_DEPS[@]}"; do
+                if ! command -v "$bdep" &> /dev/null; then
+                    MISSING_BUILD_DEPS+=("$bdep")
+                fi
+            done
+
+            # Dynamically install build dependencies if any are missing
+            if [ ${#MISSING_BUILD_DEPS[@]} -gt 0 ]; then
+                echo "Missing build tools: ${MISSING_BUILD_DEPS[*]}. Installing..."
+                if command -v dnf &> /dev/null; then sudo dnf install "${MISSING_BUILD_DEPS[@]}" -y
+                elif command -v apt-get &> /dev/null; then sudo apt-get update && sudo apt-get install "${MISSING_BUILD_DEPS[@]}" -y
+                elif command -v pacman &> /dev/null; then sudo pacman -S --noconfirm "${MISSING_BUILD_DEPS[@]}"
+                elif command -v zypper &> /dev/null; then sudo zypper install -y "${MISSING_BUILD_DEPS[@]}"
+                else
+                    show_message "error" "Compilation Aborted" "Could not automatically install build tools (${MISSING_BUILD_DEPS[*]}). Please install them manually and run 'make' inside:\n$TARGET_CLONE_DIR"
+                    return 1
+                fi
+            fi
+
+            # Move into the folder and trigger the build sequence as the real user
+            echo "Moving to build directory and compiling..."
+            cd "$TARGET_CLONE_DIR" || return 1
+
+            if [ -n "$SUDO_USER" ]; then
+                sudo -u "$REAL_USER" make
+            else
+                make
+            fi
+
+            # Check if compilation succeeded
+            if [ $? -eq 0 ]; then
+                show_message "info" "Compilation Successful" "Proton-GE has been compiled from source directly into your compatibility tools directory!\n\nPlease restart Steam completely to select it."
+            else
+                show_message "error" "Build Failed" "The automated 'make' command failed. You may be missing specific development library headers required by GloriousEggroll. Check the terminal output above for errors."
+            fi
+        else
+            show_message "info" "Manual Build Required" "Skipping automated build. Remember, you must manually navigate to:\n$TARGET_CLONE_DIR\nand run compilation commands before Steam can use this."
+        fi
     fi
-
-    FILENAME=$(basename "$TARBALL_URL")
-    TMP_FILE="/tmp/$FILENAME"
-
-    echo "Downloading $FILENAME to temporary space..."
-    if [ -n "$SUDO_USER" ]; then
-        sudo -u "$REAL_USER" curl -L "$TARBALL_URL" -o "$TMP_FILE"
-    else
-        curl -L "$TARBALL_URL" -o "$TMP_FILE"
-    fi
-
-    echo "Extracting build into compatibilitytools.d..."
-    if [ -n "$SUDO_USER" ]; then
-        sudo -u "$REAL_USER" tar -xf "$TMP_FILE" -C "$COMPAT_DIR/"
-        rm -f "$TMP_FILE"
-    else
-        tar -xf "$TMP_FILE" -C "$COMPAT_DIR/"
-        rm -f "$TMP_FILE"
-    fi
-
-    echo "GE Proton update completed."
-    zenity --info --title="Proton-GE Installed" --width=350 --text="Successfully downloaded and installed the latest Glorious Eggroll build!\n\nCRITICAL: Please restart Steam completely for the version selection dropdown to refresh."
 }
 
-# FUNCTION: Output instructions text window
+
 show_final_instructions() {
-    zenity --info --title="Fix Applied" --width=450 --text="Environment Repaired!\n\nFOLLOW THESE FINAL STEPS:\n1. Open Steam, go to Space Engineers 2 -> Properties -> General.\n2. Disable Steam Overlay.\n3. Paste these exact Launch Options:\n\nDISABLE_PRESSURE_VESSEL=1 PROTON_HIDE_NVIDIA_GPU=1 SDL_VIDEODRIVER=x11 %command% -nosplash -skipintro\n\n4. Go to the Compatibility tab.\n5. Check 'Force the use of a specific Steam Play compatibility tool'.\n6. Select your newly installed GE-Proton build from the dropdown list."
+    show_message "info" "Fix Applied" "Environment Repaired!\n\nFOLLOW THESE FINAL STEPS:\n1. Open Steam, go to Space Engineers 2 -> Properties -> General.\n2. If the game refuses to run, try disabling the steam overlay here as well.\n3. Paste these exact Launch Options:\n\nDISABLE_PRESSURE_VESSEL=1 PROTON_HIDE_NVIDIA_GPU=1 SDL_VIDEODRIVER=x11 %command% -nosplash -skipintro\n\n4. Go to the Compatibility tab.\n5. Check 'Force the use of a specific Steam Play compatibility tool'.\n6. Select your newly installed GE-Proton build from the dropdown list. Restart Steam if it does not appear."
 }
 
-# ==============================================================================
-# SWITCH MANAGEMENT & GUI ENTRY POINT
-# ==============================================================================
-show_gui_menu() {
-    CHOICE=$(zenity --list --radiolist --title="Engineers Suite Multitool" \
-        --column="Select" --column="Action Description" \
-        TRUE "Apply Space Engineers 2 Wine & Runtime Fixes" \
-        FALSE "Download & Install Latest GE-Proton (Glorious Eggroll)" \
-        --width=450 --height=220)
+show_interactive_menu() {
+    if [ "$USE_GUI" = true ]; then
+        CHOICE=$(zenity --list --radiolist --title="Engineers Suite Multitool" \
+            --column="Select" --column="Action Description" \
+            TRUE "Apply Space Engineers 2 Wine & Runtime Fixes" \
+            FALSE "Download & Install Latest GE-Proton (Glorious Eggroll)" \
+            --width=450 --height=220)
 
-    case "$CHOICE" in
-        "Apply Space Engineers 2 Wine & Runtime Fixes")
-            fix_space_engineers
-            ;;
-        "Download & Install Latest GE-Proton (Glorious Eggroll)")
-            install_latest_eggroll
-            ;;
-        *)
-            echo "Canceled."
-            exit 0
-            ;;
-    esac
+        case "$CHOICE" in
+            "Apply Space Engineers 2 Wine & Runtime Fixes") fix_space_engineers ;;
+            "Download & Install Latest GE-Proton (Glorious Eggroll)") install_latest_eggroll ;;
+            *) echo "Canceled."; exit 0 ;;
+        esac
+    else
+        echo "============================================="
+        echo "          ENGINEERS SUITE INTERACTIVE MENU   "
+        echo "============================================="
+        echo "1) Apply Space Engineers 2 Wine & Runtime Fixes"
+        echo "2) Download & Install Latest GE-Proton"
+        echo "3) Exit"
+        echo "============================================="
+        read -p "Choose an option (1-3): " menu_choice
+        
+        case "$menu_choice" in
+            1) fix_space_engineers ;;
+            2) install_latest_eggroll ;;
+            *) echo "Exiting."; exit 0 ;;
+        esac
+    fi
 }
 
 # Check command line flags before defaulting to GUI menu
@@ -234,7 +361,7 @@ case "$1" in
         show_help
         ;;
     "")
-        show_gui_menu
+        show_interactive_menu
         ;;
     *)
         echo "Error: Unknown option '$1'"
