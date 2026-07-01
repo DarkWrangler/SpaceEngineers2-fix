@@ -224,8 +224,21 @@ show_gui_menu() {
 
 # Check command line flags before defaulting to GUI menu
 case "$1" in
-    --fix) fix_space_engineers ;;
-    --eggroll) install_latest_eggroll ;;
-    --help|-h) show_help_text ;;
-    *) show_gui_menu ;;
+    --fix)
+        fix_space_engineers
+        ;;
+    --eggroll)
+        install_latest_eggroll
+        ;;
+    -h|--help)
+        show_help
+        ;;
+    "")
+        show_gui_menu
+        ;;
+    *)
+        echo "Error: Unknown option '$1'"
+        show_help
+        exit 1
+        ;;
 esac
